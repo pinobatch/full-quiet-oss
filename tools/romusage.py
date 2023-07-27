@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+"""
+romusage.py
+Visualize NES ROM as an image
+
+Copyright 2023 Retrotainment Games LLC
+Copyright 20xx Damian Yerrick
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 import sys
 import os
 import argparse
@@ -15,11 +34,13 @@ def tile_to_texels(chrdata):
     _stt = sliver_to_texels
     return [_stt(a, b) for (a, b) in zip(chrdata[0:8], chrdata[8:16])]
 
-def chrbank_to_texels(chrdata):
+def chrbank_to_texels(chrdata, planes=2):
     _ttt = tile_to_texels
-    return [_ttt(chrdata[i:i + 16]) for i in range(0, len(chrdata), 16)]
+    tilelen = 8 * planes
+    return [_ttt(chrdata[i:i + tilelen])
+            for i in range(0, len(chrdata), tilelen)]
 
-def texels_to_pil(texels, tile_width=16):
+def texels_to_pil(texels, tile_width=16, row_height=1):
     row_length = tile_width * row_height
     tilerows = [
         texels[j:j + row_length:row_height]
@@ -36,8 +57,8 @@ def texels_to_pil(texels, tile_width=16):
     im.putpalette(b'\x00\x00\x00\x66\x66\x66\xb2\xb2\xb2\xff\xff\xff'*64)
     return im
 
-def render_usage():
-    tiles = texels_to_pil(chrbank_to_texels(chrdata, 32))
+def render_usage(tilewidth=32):
+    tiles = texels_to_pil(chrbank_to_texels(chrdata, tilewidth))
     return tiles
 
 def quantizetopalette(src, palette, dither=False):
@@ -69,6 +90,9 @@ def parse_argv(argv):
     p.add_argument("-w", "--width", type=int,
                    help="number of tiles per row "
                         "(default: 128 for .nes or 16 for other extensions)")
+    p.add_argument("--row-height", type=int, default=1,
+                   help="height of each row in column-major tiles "
+                   "(default: 1; 2 may help for 8x16 sprites)")
     p.add_argument("-o", "--output",
                    help="name of PNG output file")
     p.add_argument("-C", "--config",
@@ -110,6 +134,14 @@ Return a list of the form [(memname, (start, size), [segname, ...]), ...]
     segplacement.sort(key=lambda row: row[1][0])
     return segplacement
 
+def font_getsize(font, s):
+    try:
+        bbox = font.getbbox(s)  # available in Pillow >= 9.2
+    except AttributeError:
+        return font.getsize(s)  # available in Pillow < 10.0
+    else:
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
 def draw_config(config, cfgwidth, romperpixel):
     from PIL import ImageDraw, ImageFont
     # In mode, the image is shrunk by 2 such that each scanline
@@ -125,7 +157,8 @@ def draw_config(config, cfgwidth, romperpixel):
     im = Image.new('L', (cfgwidth, romsize // romperpixel), 0)
     dc = ImageDraw.Draw(im)
     font = dc.getfont()
-    commaspacesize = font.getsize(", ")
+    commaspacesize = font_getsize(font, ", ")
+
     # Join undersize rows with the previous
     for i in range(1, len(mem_ycoord) - 1):
         if mem_ycoord[i] < 0:
@@ -139,7 +172,7 @@ def draw_config(config, cfgwidth, romperpixel):
     for y, mem in zip(mem_ycoord, config):
         if y < 0: continue
         repsegname = min(mem[2])
-        textwidth = font.getsize(repsegname)[0] + commaspacesize[0]
+        textwidth = font_getsize(font, repsegname)[0] + commaspacesize[0]
         need_comma = need_newline = False
         nexty = texts[-1][0] + commaspacesize[1] if texts else 0
         if not texts or y >= nexty:
@@ -187,7 +220,8 @@ def main(argv=None):
                 prgromsize += (header[9] & 0x0F) << 22
             infp.read(prgromsize)
         romdata = infp.read()
-    tiles = texels_to_pil(chrbank_to_texels(romdata), twidth)
+    tiles = texels_to_pil(chrbank_to_texels(romdata),
+                          twidth, args.row_height)
 
     if configname:
         cfgwidth = 128
@@ -215,7 +249,10 @@ def main(argv=None):
     if outfilename:
         tiles.save(outfilename, **saveargs)
     else:
-        tiles.show()
+        try:
+            tiles.show()
+        except Exception:
+            tiles.convert("RGB").show()
 
 if __name__=='__main__':
     if 'idlelib' in sys.modules:
