@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """
-1. read all MEMORY areas, looking for those with start >= $8000
-   and start + size <= $2000
+ROM bank packer for ca65 
+
+Copyright 2022, 2023 Retrotainment Games
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+"""What this does:
+
+1. read all MEMORY areas in the linker configuration, looking for
+   those with start >= $8000 and start + size <= $2000 (that is,
+   those that can be switched into $8000 on an MMC3 or FME-7)
 2. add up the sizes of R8_ segments as well as segments already
    in those banks
-3. try to fit R8_ segments in the free space
-4. write out the SEGMENTs
+3. try to fit R8_ segments in the free space, using a first fit
+   decreasing algorithm
+4. write out the SEGMENT entries
 """
 import os, sys, re, argparse, subprocess, bisect
 from collections import defaultdict
@@ -179,13 +199,16 @@ free space in the corresponding bank.
     return assignments, bank_sizes
 
 def parse_argv(argv):
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        description="Packs ROM segments into 8 KiB banks."
+    )
     p.add_argument("module", nargs="+",
                    help="object files included in program")
     p.add_argument("-C", "--config",
-                   help="linker config file template")
+                   help="linker config file template "
+                   "(must include #pack8k in SEGMENTS)")
     p.add_argument("-P", "--prefix", default="R8_",
-                   help="linker config file template (default: R8_)")
+                   help="prefix of names of segments to pack (default: R8_)")
     p.add_argument("-o", "--output", default="-",
                    help="output linker config file (default: - for stdout)")
     p.add_argument("-v", "--verbose", action="store_true",
@@ -226,7 +249,7 @@ def main(argv=None):
             out.append("# End addition by pack8k.py\n")
             added = True
     if not added:
-        print("%s: no line #pack8k" % sys.exit)
+        print("%s: no line #pack8k" % args.config)
         sys.exit(1)
 
     if args.output == '-':
@@ -238,21 +261,7 @@ def main(argv=None):
 if __name__=='__main__':
     if 'idlelib' in sys.modules:
         filenames = """
-alignedbss popslide64 mmc3
-  init main indicators mapdecoding camera tilerot
-  player physics dynamite terrain
-  seqrings ropes warps warpsdata packedmapnames
-  actorclasses metasprite spritevram coversprites
-  title notes.txt save puzzle campcache barrier
-  pda_main pda_mapa pda_inv pda_mapb levelselect
-  cabinstatus cabinstatusborder radio radio_nstripes
-  transmissions portraits Rolt_nstripes
-  pads ppuclear math unpb8 nstripe irq bg bcd rand
-  levels baddiesmgr levelsections sniping aoe attract mapprocs
-  baddies rhyllekk sono skitter pickups bullets fungal_wall stump
-  hisser walkee duwagos subtunnel switches switchpos switchactors
-  birds vinelifts rolt dokrodonac syyth boss
-  ft4stub
+bg main pads ppuclear init mmc3 player
 """.split()
         argv = """
 ./pack8k.py -v -C ../mmc3_4mbit.cfg -o ../mmc3_4mbit_packed.cfg -P R8_
