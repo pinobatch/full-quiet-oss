@@ -324,9 +324,38 @@ sheetftb = $0E
 
 ;;
 ; Draws one metasprite.
-; @param A frame number
-; @param X spritesheet
-; @param mspr_* see global.inc
+;
+; The data for each cel consist of a list of horizontal rows of
+; 8x16-pixel objects, ordered from front to back:
+;
+; - X, Y, flags, tile IDs
+; - X, Y, flags, tile IDs
+; - X, Y, flags, tile IDs
+; - $00 terminator ends the list
+;
+; X and Y are the coordinates at the top left of this row of objects,
+; where the cel's center is at (128, 128).  Use of excess-128
+; representation makes clipping at the sides more efficient.
+;
+; Flags is %000LLLPP, where
+;
+; - P is the palette for this row
+; - L is the number of objects in the row minus 1
+;
+; This is followed by L+1 bytes representing objects in the row.
+; Each are %VHTTTTTA, where
+;
+; - V = 1 to flip this object vertically
+; - H = 1 to flip this object horizontally
+; - T is the base tile ID within the 1K page (0, 2, 4, 6, ..., 62)
+; - A = 1 to use the next tile ID when the actor faces left
+;
+; @param X sprite sheet ID, offset into sheet_msprtables
+; @param A frame number within sheet, offset into that sheet's table
+; @param mspr_xlo, mspr_xhi, mspr_ylo, mspr_yhi actor's position on screen
+; @param mspr_window amount to add to all tile IDs (e.g. $00, $40, $80, $C0)
+; @param mspr_attr flags 0HP000CC, where H faces left, P goes behind the
+;        background, and C is XOR'd with each row's color
 .proc draw_metasprite
 stripy = $08
 stripattr = $0A
@@ -406,7 +435,7 @@ next_strip:
     rts
   not_done:
   iny
-  ; N should be clear or we dun goofed
+  ; N should be clear or we dun goofed (>128-byte definition).  Set a breakpoint.
   bit mspr_attr
   bvc :+
     eor #$FF
@@ -474,6 +503,8 @@ next_strip:
   ; ||+------- draw behind background
   ; |+-------- draw individual tiles flipped horizontally
   ; +--------- draw strip flipped vertically
+  ; Current tools emit bits 7 and 6 false, instead flipping
+  ; individual sprites.
   lda (stripptrlo),y
   and #$E3
   sta stripattr
