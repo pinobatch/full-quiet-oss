@@ -1,135 +1,22 @@
 #!/usr/bin/env python3
 """
-nstripes.py
 Stripe Image extractor
-
-Copyright 2023 Retrotainment Games LLC
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-----
 
 takes a 4-color indexed image
 extracts unique tiles and Stripe Image from a file
-
-keywords in the file (all dimensions in pixels)
-
-stripe <name>
-begins a cel
-
-hrect <left> <top> <width> <height>
-adds horizontal strips in this rectangle to this cel
-
-vrect <left> <top> <width> <height>
-adds vertical strips in this rectangle to this cel
-
-rect <left> <top> <width> <height>
-adds horizontal or vertical strips in this rectangle to this cel
-(depending on the rectangle's shape)
-
-dest <left> <top>
-set the destination address on the nametable at which
-the cel shall be drawn
-
-fallthrough
-don't emit $FF terminator at the end of this cel; instead,
-combine this cel with the following cel
+in a file format to be determined
 
 """
 import os, sys, argparse
 from PIL import Image
-
-def bytestotile(pxdata, width, x, y):
-    rows = [pxdata[p:p + 8]
-            for p in range(y * width + x, (y + 8) * width + x, width)]
-    d1 = bytes(
-        reduce(bitor, (((row[x] >> p) & 1) << (7 - x) for x in range(8)))
-        for p in (0, 1)
-        for row in rows
-    )
-    return d1
-
-def bmptochr_colmajor(im):
-    """Convert an indexed image to NES tiles, in rows top to bottom"""
-    pxdata, w = im.tobytes(), im.size[0]
-    return [
-        bytestotile(pxdata, w, x, y)
-        for x in range(0, w, 8)
-        for y in range(0, im.size[1], 8)
-    ]
-
-def bmptochr_rowmajor_nonp(im):
-    """Convert an indexed image to NES tiles, in rows top to bottom
-
-(Fallback for when NumPy is not available)
-"""
-    pxdata, w = im.tobytes(), im.size[0]
-    return [
-        bytestotile(pxdata, w, x, y)
-        for y in range(0, im.size[1], 8)
-        for x in range(0, w, 8)
-    ]
-
-# For the common case
-def bmptochr_rowmajor(im):
-    """Convert an indexed image to NES tiles, in rows top to bottom
-
-By Vanadium#6231 in the gbadev Discord server, 2023-01-18
-License: "I consider it too short to be copyrightable; I disclaim copyright"
-"""
-    try:
-        import numpy as np
-    except ImportError:
-        return bmptochr_rowmajor_nonp(im)
-    # Convert to an array of 8x8 tiles of pixel data.
-    pixels = np.array(im)
-    height, width = pixels.shape
-    tiles = (pixels.reshape(height//8, 8, width//8, 8)
-             .swapaxes(1, 2)
-             .reshape(-1, 8, 8))
-
-    # Pack into NES format.
-    bits = tiles[:,None] >> np.array([0, 1], np.uint8)[None,:,None,None]
-    bits &= 1
-    out = np.packbits(bits, axis=3).tobytes()
-    return [out[x:x+16] for x in range(0, len(out), 16)]
-
-def load_fix_tiles(filename, colmajor=False):
-    """Load fix tiles from a file.
-
-filename -- name of indexed image file or CHR file
-
-Return a list of bytes-like objects each of length 16.
-"""
-    try:
-        im = Image.open(filename)
-    except OSError as e:
-        # Assume it's raise OSError("cannot identify image file")
-        # because older Pillow versions lack UnidentifiedImageError
-        with open(filename, 'rb') as infp:
-            data = infp.read()
-        if len(data) % 16 != 0 or not 0 < len(data) <= 4096:
-            raise
-        data = [data[i:i + 16] for i in range(0, len(data), 16)]
-    else:
-        # Assume it's a 2-bit PNG
-        if im.mode != 'P':
-            raise ValueError("an indexed image file is required")
-        data = bmptochr_colmajor(im) if colmajor else bmptochr_rowmajor(im)
-    return data
+from libfq import load_fix_tiles, bmptochr_rowmajor
 
 NSTRIPE_RUN = 0x40
 NSTRIPE_DOWN = 0x80
+
+def ld65parseint(intval):
+    if intval.startswith("$"): return int(intval[1:], 16)
+    return int(intval, 0)
 
 def parse_extra_tiles(s):
     firsttile, filename = s.split(":", 1)
@@ -150,13 +37,17 @@ def parse_argv(argv):
                    help="filename to which ASM data is written")
     p.add_argument('--segment', default='RODATA',
                    help="ca65 segment in which to put stripe maps")
+    p.add_argument("--base-tile", type=ld65parseint, default=0,
+                   help="first tile number")
     p.add_argument("--fix-tiles", metavar="FILENAME",
                    help="force the first pattern table indices to the "
-                        "first tiles in FILENAME (a .chr or 4-color .png)")
+                        "first tiles in FILENAME (a .chr or 4-color PNG) "
+                        " and include them in CHRFILE")
     p.add_argument("--extra-tiles", metavar="HEX:FILENAME", nargs='*',
                    type=parse_extra_tiles,
                    help="use extra tiles from FILENAME (a .chr or 4-color "
-                        ".png) at tile IDs starting at 0xHH")
+                        "PNG) at tile IDs starting at 0xHH "
+                        "and do not include them in CHRFILE")
     return p.parse_args(argv[1:])
 
 class StripeFileParser(object):
@@ -283,7 +174,8 @@ def ca65_addrarray(s):
 
 def main(argv=None):
     args = parse_argv(argv or sys.argv)
-    print("extra tiles:", args.extra_tiles, file=sys.stderr)
+    if args.extra_tiles:
+        print("note: extra tiles:", args.extra_tiles, file=sys.stderr)
 
     # Load the stripe spec
     parsed = StripeFileParser(args.STRIPEFILE)
@@ -297,7 +189,7 @@ def main(argv=None):
     # Load constant tile data
     fix_tiles = []
     if args.fix_tiles: fix_tiles.extend(load_fix_tiles(args.fix_tiles))
-    itiles = {t: i for i, t in enumerate(fix_tiles)}
+    itiles = {t: i + args.base_tile for i, t in enumerate(fix_tiles)}
     all_extra_tiles = {}
     for extra_tile_id, filename in (args.extra_tiles or []):
         extra_tiles = load_fix_tiles(filename)
@@ -339,7 +231,7 @@ def main(argv=None):
                 try:
                     tile = all_extra_tiles[tile]
                 except KeyError:
-                    tile = itiles.setdefault(tile, len(itiles))
+                    tile = itiles.setdefault(tile, len(itiles) + args.base_tile)
                 tilenums.append(tile)
             if (len(tilenums) > 1
                 and all(x == tilenums[0] for x in tilenums)):
@@ -356,7 +248,7 @@ def main(argv=None):
         # Uninvert and write tile data
         tiles = list(fix_tiles)
         tiles.extend([None] * (len(itiles) - len(fix_tiles)))
-        for t, i in itiles.items(): tiles[i] = t
+        for t, i in itiles.items(): tiles[i - args.base_tile] = t
         if None in tiles:
             print("tiles has None at $%02X" % tiles.index(None),
                   file=sys.stderr)
