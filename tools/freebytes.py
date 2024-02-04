@@ -41,11 +41,7 @@ moved in or out of LINEAR or HOME.
 3. Calculate how much of each memory area is occupied
 
 """
-import os, sys, re
-
-PROGDIR = os.path.dirname(sys.argv[0])
-linkscriptname = os.path.join(PROGDIR, "..", "mmc3_4mbit_packed.cfg")
-mapoutputname = os.path.join(PROGDIR, "..", "map.txt")
+import os, sys, argparse, re
 
 # Loading linker script #############################################
 
@@ -98,9 +94,18 @@ def ld65_map_get_sections(filename):
         for s in sections
     }
 
-def main():
-    lscontents, memstartsize, segtomem = ld65_load_linker_script(linkscriptname)
-    mapsections = ld65_map_get_sections(mapoutputname)
+def parse_argv(argv):
+    p = argparse.ArgumentParser(description="Calculates free space by bank in a cc65 project.")
+    p.add_argument("-C", "--config",
+                   help="path to ld65 config file")
+    p.add_argument("-m", "--mapfile",
+                   help="path to map file written by ld65")
+    return p.parse_args(argv[1:])
+
+def main(argv=None):
+    args = parse_argv(argv or sys.argv)
+    lscontents, memstartsize, segtomem = ld65_load_linker_script(args.config)
+    mapsections = ld65_map_get_sections(args.mapfile)
     seglist = [
         line.split() for line in mapsections["name start end size align"] if line
     ]
@@ -141,4 +146,9 @@ def main():
           % (poolsize - poolused))
 
 if __name__=='__main__':
-    main()
+    if "idlelib" in sys.modules:
+        main("""
+./freebytes.py -C ../bnrom1mbit.cfg -m ../map.txt
+""".split())
+    else:
+        main()
