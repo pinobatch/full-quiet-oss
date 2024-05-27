@@ -3,7 +3,7 @@
 strips.py
 Sprite sheet extractor for use with metasprite.s
 
-Copyright 2023 Retrotainment Games LLC
+Copyright 2023, 2024 Retrotainment Games LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,6 +51,25 @@ def parseintorhex(s):
     else:
         return int(s)
 
+def parse_palette(line):
+    """parse a strips file's palette line
+
+Return (subpalette id, [(RGB, color number), ...])
+"""
+    curpalnum = int(line[1])
+    paldata = []
+    for palspec in line[2:]:
+        palspec = palspec.split('=', 1)
+        colornum = (int(palspec[1])
+                    if len(palspec) > 1
+                    else len(paldata) + 1)
+        rgb = parse_color(palspec[0])
+        if rgb is None:
+            raise ValueError("%s is not a color (expected #rgb or #rrggbb)"
+                             % palspec[0])
+        paldata.append((rgb, colornum))
+    return curpalnum, paldata
+
 def find_related_sets(allnames, pairs):
     """Partition a graph into its connected sets.
 
@@ -79,7 +98,7 @@ Values in the same set will have object identity (a is b).
 
 class StripsFileReader(object):
 
-    def __init__(self, iterable=None, verbose=False):
+    def __init__(self, iterable=None, verbose=False, filename=None):
         self.framenames = []
         self.frames = {}
         self.cur_frame = self.cur_framename = 0
@@ -95,6 +114,7 @@ class StripsFileReader(object):
         self.verbose = verbose
         self.framenumaliases = []
         self.hflipped = False
+        self.filename = filename
         if iterable is not None:
             self.extend(iterable)
 
@@ -113,7 +133,14 @@ class StripsFileReader(object):
         except KeyError:
             pass
         else:
-            return handler(self, line)
+            try:
+                return handler(self, line)
+            except Exception as e:
+                filename_colon = "%s: " % self.filename if self.filename else ""
+                print('%s"%s" gave %s: %s'
+                      % (filename_colon, " ".join(line), type(e).__name__, e),
+                      file=sys.stderr)
+                raise
 
         # Handle attributes
         try:
@@ -211,17 +238,7 @@ class StripsFileReader(object):
         self.backdrop, self.backdrop_linenum = backdrop, self.linenum
 
     def append_palette(self, line):
-        curpalnum = int(line[1])
-        paldata = []
-        for palspec in line[2:]:
-            palspec = palspec.split('=', 1)
-            colornum = (int(palspec[1])
-                        if len(palspec) > 1
-                        else len(paldata) + 1)
-            rgb = parse_color(palspec[0])
-            if rgb is None:
-                raise ValueError("%s is not a color" % palspec[0])
-            paldata.append((rgb, colornum))
+        curpalnum, paldata = parse_palette(line)
         self.palettes[curpalnum] = paldata
 
     @staticmethod
@@ -881,39 +898,47 @@ def parse_argv(argv):
     # -d: write intermediate files to current directory
     parser = argparse.ArgumentParser()
     parser.add_argument('STRIPSFILE',
-                        help="filename of strips specification")
+                        help="name of cel position file")
     parser.add_argument('CELIMAGE',
                         help="image containing all cels")
-    parser.add_argument('--flip',
-                        help="image containing all cels with emblems flipped")
+    parser.add_argument('--flip', metavar="FLIPCELIMAGE",
+                        help="image containing all cels with emblems flipped, used for left-facing cels")
     parser.add_argument('CHRFILE', nargs="?",
                         help="filename to which CHR data is written")
     parser.add_argument('ASMFILE', nargs="?",
-                        help="filename to which ASM data is written")
+                        help="filename to which metasprite maps are written")
     parser.add_argument('--write-frame-numbers', metavar="FRAMENUMFILE",
-                        help="write frame numbers in FRAME_xxx=nnn format")
+                        help="filename to write frame numbers as FRAME_xxx=nn, "
+                        "FRAMEBANK_xxx=nn, and FRAMETILENUM_xxx=nn")
     parser.add_argument('--prefix', default='',
                         help="prefix of frametobank, mspraddrs, NUMFRAMES, and NUMTILES symbols")
     parser.add_argument('--segment', default='RODATA',
-                        help="ca65 segment in which to put metasprite maps")
+                        help="name of ld65 segment in which to put metasprite maps "
+                        "(default: RODATA)")
+    parser.add_argument('--bank-size', default=32, type=int, metavar="NUM",
+                        help="size of bank in tiles (default: 32)")
     parser.add_argument('-d', "--intermediate", action="store_true",
-                        help="write intermediate image files")
+                        help="print more debugging info and write "
+                        "-boxing, -tiles, and -utiles images to current directory")
     args = parser.parse_args(argv[1:])
     return (args.STRIPSFILE, args.CELIMAGE, args.flip,
             args.CHRFILE, args.ASMFILE, args.write_frame_numbers,
-            args.prefix, args.segment, args.intermediate)
+            args.prefix, args.segment, args.intermediate, args.bank_size)
 
 def load_strips_from(stripsfilename, celimfilename, celimfilename_flip=None,
                      verbose=False):
     """Load tile and strip data 
 
-Return a tuple:
-frames -- dict from frame name to frame data, where frame data is ?
+Return a tuple with these elements:
+frames -- dict from frame name to frame data, where frame data is as
+    specified in StripsFileReader)
 framenames -- list of frame names in the order in which they were specified
 alltiles -- all tiles encountered, with normal and L variants interleaved
 stripmap -- list of how many tiles are seen by the time of each strip
-hstripmap -- list of (x, y, color, width) of each horizontal strip
-
+hstripmap -- [(x, y, color, width), ...] of each horizontal strip
+relatedsets -- sets of related frame names as {f: {f1, f2, ...}, ...}
+lookuptables -- {table name, (values, line where defined, segment, 0), ...}
+framenumaliases -- [(alternate name, frame number), ...] from aka
 """
     # Load cel images
     celimbasename = os.path.splitext(os.path.basename(celimfilename))[0]
@@ -941,7 +966,9 @@ hstripmap -- list of (x, y, color, width) of each horizontal strip
     sttnormal = strips_to_tiles(framesinorder, celim, backdrop, dstpalettes,
                                 alltiles_name)
     tiledata, stripmap, hstripmap = sttnormal
+    celim.close()
     assert len(stripmap) == len(framesinorder)
+
     if celimfilename_flip:
         celimbasename_flip = os.path.splitext(os.path.basename(celimfilename_flip))[0]
         celimq = Image.open(celimfilename_flip) if celimfilename_flip else celim
@@ -950,6 +977,7 @@ hstripmap -- list of (x, y, color, width) of each horizontal strip
                               else None)
         sttflip = strips_to_tiles(framesinorder, celimq, backdrop, dstpalettes,
                                   alltiles_name_flip)
+        celimq.close()
         tiledataq = sttflip[0]
         assert len(tiledataq) == len(tiledata)
     else:
@@ -969,7 +997,7 @@ def main(argv=None):
     args = parse_argv(argv or sys.argv)
     (stripsfilename, celimfilename, celimfilename_flip,
      chrfilename, asmfilename, framenumfilename,
-     symbolprefix, outsegment, write_intermediate) = args
+     symbolprefix, outsegment, write_intermediate, sizeof_bank) = args
     
     rv = load_strips_from(stripsfilename, celimfilename, celimfilename_flip,
                           write_intermediate)
@@ -1026,7 +1054,6 @@ def main(argv=None):
     framesbysubset = [(i, f[9]) for i, f in enumerate(framesinorder)]
     framesbysubset.sort(key=lambda row: (0 if row[1] else 1, row[0]))
 
-    sizeof_bank = 32
     use_related = True
 
     # Find all cel IDs connected through a "related" chain
@@ -1047,9 +1074,9 @@ def main(argv=None):
 
     # Place tiles in banks
     nbanks = -(-len(uniquetiles) // sizeof_bank)
-    use_solve_overload = True  # nbanks > 1
+    use_solve_overload = True
     if use_solve_overload:
-        # Pagination problem solver
+        # Pagination problem solver; makes subset nonfunctional
         pages = solve_overload.run(job)
         pages.decant()
         tilesinbank = [
@@ -1058,12 +1085,13 @@ def main(argv=None):
         ]
         tilesinbank.sort()
 
-        # Move (may need to be revised if we ever use subset again)
+        # Move the shortest bank to the end
         shortest_bank = min(enumerate(tilesinbank), key=lambda x: len(x[1]))[0]
         tilesinbank[-1], tilesinbank[shortest_bank] = \
                          tilesinbank[shortest_bank], tilesinbank[-1]
     else:
         # Previous greedy first fit approach to packing
+        # (which allows subset but needs more fine-tuning with related)
         tilesinbank = [set() for i in range(nbanks)]
         for tilesneeded in job["tiles"]:
             for b in range(len(tilesinbank)):
@@ -1116,9 +1144,9 @@ def main(argv=None):
     banktilesheets = [[uniquetiles[x] for x in ts] for ts in tilesinbank]
     if write_intermediate:
         print("Bank tile sheets length is", [len(x) for x in banktilesheets])
-    # Experimental: Don't pad the last bank
+    # Don't pad the last bank
     for ts in banktilesheets[:-1]:
-        ts.extend([solidtile] * (32 - len(ts)))
+        ts.extend([solidtile] * (sizeof_bank - len(ts)))
     if chrfilename:
         with open(chrfilename, 'wb') as outfp:
             for ts in banktilesheets:
@@ -1126,7 +1154,7 @@ def main(argv=None):
     if write_intermediate:
         print("Bank tile sheets padded to", [len(x) for x in banktilesheets])
         texels1 = [tile_to_texels(x) for ts in banktilesheets for x in ts]
-        im = texels_to_pil(texels1, 32)
+        im = texels_to_pil(texels1, sizeof_bank)
         celimbasename = os.path.splitext(os.path.basename(celimfilename))[0]
         im.save(celimbasename + "-uniquetiles.png")
 
@@ -1252,18 +1280,13 @@ def main(argv=None):
             outfp.writelines(framenumlines)
     
 if __name__=='__main__':
-    in_IDLE = 'idlelib.__main__' in sys.modules or 'idlelib.run' in sys.modules
-    if in_IDLE:
+    if 'idlelib' in sys.modules:
         main([
             'strips.py', '-d',
-            "../src/Hero.strips",
-            "../tilesets/sprites/Hero.png",
+            "../src/Tami.strips",
+            "../tilesets/sprites/Tami.png",
+            "--flip", "../tilesets/sprites/TamiL.png",
+            "--bank-size", "32"
         ])
-##        main([
-##            'strips.py', '-d',
-##            "../src/Breakwalls.strips",
-##            "../tilesets/sprites/Breakwalls.png",
-##        ])
     else:
         main()
-
