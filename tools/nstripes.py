@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-nstripes.py
 Stripe Image extractor
 
-Copyright 2023 Retrotainment Games LLC
+takes a 4-color indexed image
+extracts unique tiles and Stripe Image from a PNG + position file
+
+Copyright 2023, 2025 Retrotainment Games LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,35 +18,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-----
-
-takes a 4-color indexed image
-extracts unique tiles and Stripe Image from a file
-
-keywords in the file (all dimensions in pixels)
-
-stripe <name>
-begins a cel
-
-hrect <left> <top> <width> <height>
-adds horizontal strips in this rectangle to this cel
-
-vrect <left> <top> <width> <height>
-adds vertical strips in this rectangle to this cel
-
-rect <left> <top> <width> <height>
-adds horizontal or vertical strips in this rectangle to this cel
-(depending on the rectangle's shape)
-
-dest <left> <top>
-set the destination address on the nametable at which
-the cel shall be drawn
-
-fallthrough
-don't emit $FF terminator at the end of this cel; instead,
-combine this cel with the following cel
-
 """
 import os, sys, argparse
 from PIL import Image
@@ -151,20 +124,21 @@ def parse_argv(argv):
     p.add_argument("CHRFILE", nargs="?",
                    help="filename to which CHR data is written")
     p.add_argument("ASMFILE", nargs="?",
-                   help="filename to which ASM data is written")
+                   help="filename to which ASM stripe map data is written")
     p.add_argument('--segment', default='RODATA',
                    help="ca65 segment in which to put stripe maps")
-    p.add_argument("--base-tile", type=ld65parseint, default=0,
-                   help="first tile number")
+    p.add_argument("-b", "--base-tiles", metavar="TILEID", type=int,
+                   help="start captured tiles (and fixed tiles) at "
+                   "a particular tile ID (default: 0)")
     p.add_argument("--fix-tiles", metavar="FILENAME",
                    help="force the first pattern table indices to the "
-                        "first tiles in FILENAME (a .chr or 4-color PNG) "
-                        " and include them in CHRFILE")
-    p.add_argument("--extra-tiles", metavar="HEX:FILENAME", nargs='*',
+                        "first tiles in FILENAME (a .chr or 4-color .png), "
+                        "and include them at the start of CHRFILE")
+    p.add_argument("--extra-tiles", metavar="HH:FILENAME", nargs='+',
                    type=parse_extra_tiles,
                    help="use extra tiles from FILENAME (a .chr or 4-color "
-                        "PNG) at tile IDs starting at 0xHH "
-                        "and do not include them in CHRFILE")
+                        ".png) at tile IDs starting at 0xHH, and do not "
+                        "include them in CHRFILE")
     return p.parse_args(argv[1:])
 
 class StripeFileParser(object):
@@ -278,7 +252,7 @@ Return a list in the form
                 out.append((destx + x, desty + t, NSTRIPE_DOWN,
                             [tiles[y][x] for y in range(t, t + h)]))
     return out
-                
+
 def ca65_bytearray(s):
     s = ['  .byte ' + ','.join(str(ch) for ch in s[i:i + 16])
          for i in range(0, len(s), 16)]
@@ -292,7 +266,8 @@ def ca65_addrarray(s):
 def main(argv=None):
     args = parse_argv(argv or sys.argv)
     if args.extra_tiles:
-        print("note: extra tiles:", args.extra_tiles, file=sys.stderr)
+        print("nstripes.py: note: extra tiles:",
+               args.extra_tiles, file=sys.stderr)
 
     # Load the stripe spec
     parsed = StripeFileParser(args.STRIPEFILE)
@@ -306,7 +281,7 @@ def main(argv=None):
     # Load constant tile data
     fix_tiles = []
     if args.fix_tiles: fix_tiles.extend(load_fix_tiles(args.fix_tiles))
-    itiles = {t: i + args.base_tile for i, t in enumerate(fix_tiles)}
+    itiles = {t: i + args.base_tiles for i, t in enumerate(fix_tiles)}
     all_extra_tiles = {}
     for extra_tile_id, filename in (args.extra_tiles or []):
         extra_tiles = load_fix_tiles(filename)
@@ -348,7 +323,7 @@ def main(argv=None):
                 try:
                     tile = all_extra_tiles[tile]
                 except KeyError:
-                    tile = itiles.setdefault(tile, len(itiles) + args.base_tile)
+                    tile = itiles.setdefault(tile, len(itiles) + args.base_tiles)
                 tilenums.append(tile)
             if (len(tilenums) > 1
                 and all(x == tilenums[0] for x in tilenums)):
@@ -365,7 +340,7 @@ def main(argv=None):
         # Uninvert and write tile data
         tiles = list(fix_tiles)
         tiles.extend([None] * (len(itiles) - len(fix_tiles)))
-        for t, i in itiles.items(): tiles[i - args.base_tile] = t
+        for t, i in itiles.items(): tiles[i - args.base_tiles] = t
         if None in tiles:
             print("tiles has None at $%02X" % tiles.index(None),
                   file=sys.stderr)
@@ -390,7 +365,6 @@ def main(argv=None):
             outfp.writelines(x + "\n" for x in lines)
     else:
         print(sumline)
-    
 
 if __name__=="__main__":
     if "idlelib" in sys.modules:
