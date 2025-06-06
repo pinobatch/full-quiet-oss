@@ -7,14 +7,10 @@ for use in an NES game.  It was originally created for the game
 in *Full Quiet* and *Garbage Pail Kids*, it was agreed to release it
 to the public.
 
-The tool reads a cel position file that gives locations of
-cels in the image file, grabs 8×16-pixel tiles from those cels,
-packs the cels into 32-tile banks using an
-[implementation of the overload-and-remove algorithm][Grange_github]
-for overlapping bin packing described in a 2017
-[article by Aristide Grange et al.][Grange_arxiv], and writes tables
-describing the shape of each cel as well as other user-specified data
-pertaining to each cel.
+The tool reads a cel position file that gives locations of cels in
+the image file, grabs 8×16-pixel tiles from those cels, packs the
+cels into CHR banks, and writes tables describing the shape of each
+cel as well as other user-specified data pertaining to each cel.
 
 Invoking
 --------
@@ -47,17 +43,7 @@ Options:
 Giving `-d` and omitting `CHRFILE` and `ASMFILE` is useful when
 checking a sheet for errors before adding it to your project.
 
-The default `--bank-size 32` is tuned for MMC3, which has 1024-byte
-CHR banks that each hold 32 8×16-pixel tiles.  Other `--bank-size`
-values are useful:
-
-- `--bank-size 29` combined with further processing on `CHRFILE` lets
-  you repeat a particular set of 3 sprite tiles in all banks.
-- `--bank-size 16` uses the smaller 512-byte banks found in some
-  modern mappers.
-- `--bank-size 128` mostly disables splitting a sheet into banks.
-  This is useful in projects using NROM, UNROM, or other discrete
-  logic mappers.
+See section "Bank packing" for what `--bank-size` does.
 
 Basic structure
 ---------------
@@ -138,10 +124,11 @@ Keywords and types used in cels:
   identical but use different cel IDs.  The hotspot is not reused.
   This keyword may appear on the same line as `frame` or the
   following line.
-- `<nameofframe>` must be a valid ca65 identifier, unique across all
-  sprite sheets in the project.  If `--write-frame-numbers` is given,
-  `strips.py` writes a constant for each cel, with a name prefixed
-  `FRAME_` and a value of the cel ID.
+- `<nameofframe>` must be a valid ca65 identifier (allowing letters,
+  digits, and underscore `_`), unique across all sprite sheets in the
+  project.  If `--write-frame-numbers` is given, `strips.py` writes a
+  constant for each cel, with a name prefixed `FRAME_` and a value of
+  the cel ID.
 - A clipping rectangle `<cliprect>` is four integers of the form
   `<left> <top> <width> <height>`, specifying a region of the image.
 - A `<palid>` tells what palette ID to use for this strip, as a
@@ -179,12 +166,12 @@ different tables.
 Global things:
 
     table <tablename> in <segmentname>
-      attribute <keyword> in <tablename>
-      flag <keyword> <intorhex> in <tablename>
+      attribute <custom_keyword> in <tablename>
+      flag <custom_keyword> <intorhex> in <tablename>
 
     table <tablename> in <segmentname>
     table <tablename> in <segmentname>
-      actionpoint <keyword> in `<tablename?>` `<tablename?>`
+      actionpoint <custom_keyword> in `<tablename?>` `<tablename?>`
 
 Keywords and types used with lookup tables:
 
@@ -210,9 +197,11 @@ Keywords and types used with lookup tables:
   project's linker configuration file, such as `RODATA`.
   It is recommended to use a segment in the same ROM bank as the
   code that reads the table.
-- `<keyword>` is a keyword.  It can be used below a `frame` to assign
-  a value for that cel's entry in the table associated with that
-  keyword.
+- `<custom_keyword>` is a keyword.  It can be used below a `frame`
+  to assign a value or coordinates for that cel's entry in the table
+  associated with that keyword.  The keyword names `frame_left`
+  and `frame_right` are reserved; they denote the left and right
+  boundaries of each cel and can be used for collision or occlusion.
 - `<intorhex>` is a value from 0 to 255, expressed in decimal (such
   as `123`), 6502 hexadecimal (such as `$7B`), or C hexadecimal
   (such as `0x7B`).
@@ -228,6 +217,12 @@ An example with lookup tables:
     table Libbet_celflags
       attribute duration in Libbet_celflags
       flag aerial 0x80 in Libbet_celflags
+
+    table Libbet_frame_left
+      attribute frame_left in Libbet_frame_left
+
+    table Libbet_frame_right
+      attribute frame_right in Libbet_frame_right
 
     table Libbet_eye_height
       actionpoint eye in - Libbet_eye_height
@@ -256,17 +251,60 @@ Advanced keywords
 - `align` asserts that the following cel ID is a multiple of a
   given number.  Useful for animations that toggle between two or
   among four cels.
-- `related` forces this cel to be kept in the same CHR page as
-  another cel.  This can be used to keep both an attack and its
-  related projectiles paged in at once.
+- `related` stores this cel in the same bank as another cel.  This
+  can be used to keep both an attack and its related projectiles
+  paged in at once, or to give the greedy packer a hint.
 - `subset` (deprecated) packs the cel before packing other cels.
   This was originally intended to put a specific set of cels into a
-  lower-numbered CHR page, letting an engine unpack only a basic
+  lower-numbered CHR bank, letting an engine unpack only a basic
   subset of the tiles needed for an NPC into CHR RAM compared to the
   tiles needed when the same character is playable.  It became less
-  functional in October 2019 when strips.py switched from greedy
+  functional in October 2019 when `strips.py` switched from greedy
   packing to overload-and-remove packing.
 - `<alignment>` is an integer greater than 1.
+
+Bank packing
+------------
+
+Each `strip` becomes a sequence of 8×16-pixel tiles.  These are
+packed into CHR banks whose size is specified with the `--bank-size`
+command-line option.  The default `--bank-size 32` is tuned for MMC3,
+which has 1024-byte CHR banks that each hold 32 8×16-pixel tiles.
+Several other popular NES mappers likewise use 1024-byte CHR banks:
+
+- Nintendo's MMC5
+- MMC3's predecessor Namco 108, 109, 118, 119, and Tengen MIMIC-1
+- Namco 129, 163, 175, and 340
+- Konami's VRC2, VRC4, VRC6, and VRC7
+- Sunsoft 5A, 5B, and FME-7
+- J.Y. Company's ASIC
+
+Other `--bank-size` values are useful:
+
+- `--bank-size 29` combined with further processing on `CHRFILE` lets
+  you repeat a particular set of 3 sprite tiles in all banks.
+- `--bank-size 16` uses the smaller 512-byte banks found in some
+  modern mappers.
+- `--bank-size 128` implies 4096 bytes, which mostly disables
+  splitting a sheet into banks.  This is useful in projects using
+  NROM, UNROM, or other discrete logic mappers.
+
+If a sheet has more tiles than will fit in one bank, `strips.py`
+tries two methods to pack the tiles such that each cel and its
+`related` cels share a bank while minimizing the number of banks.
+
+1. The "greedy" method tries to pack each cel's tiles into the bank
+   that shares the most tiles with the cel.
+2. The "overload" method uses the
+   [reference implementation][Grange_github] of the "overload and
+   remove" algorithm for overlapping bin packing described in a
+   2017 [article by Aristide Grange et al.][Grange_arxiv].
+
+`strips.py` always tries greedy first.  It also tries overload if
+the `solve_overload.py` module is present and more than one bank
+is needed, and it uses the result of overload if it is smaller.
+(Here, "smaller" means either fewer banks or the same number of
+banks and fewer used tiles in the smallest bank.)
 
 Index of keywords
 -----------------

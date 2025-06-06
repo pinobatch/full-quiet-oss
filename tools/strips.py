@@ -3,7 +3,7 @@
 strips.py
 Sprite sheet extractor for use with metasprite.s
 
-Copyright 2023, 2024 Retrotainment Games LLC
+Copyright 2023, 2025 Retrotainment Games LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,10 @@ import sys
 import argparse
 from PIL import Image, ImageDraw
 from pilbmp2nes import pilbmp2chr
-import solve_overload
+try:
+    import solve_overload
+except ImportError:
+    solve_overload = None
 
 colorRE = re.compile('#([0-9a-fA-F]+)$')
 Cel = namedtuple("Cel", "strips linenum l t w h hotx hoty hflip insubset")
@@ -971,7 +974,7 @@ framenumaliases -- [(alternate name, frame number), ...] from aka
 
     if celimfilename_flip:
         celimbasename_flip = os.path.splitext(os.path.basename(celimfilename_flip))[0]
-        celimq = Image.open(celimfilename_flip) if celimfilename_flip else celim
+        celimq = Image.open(celimfilename_flip)
         alltiles_name_flip = (celimbasename_flip + "-tiles.png"
                               if verbose
                               else None)
@@ -991,7 +994,8 @@ framenumaliases -- [(alternate name, frame number), ...] from aka
     if stripsfile.lookuptables:
         stripsfile.calc_actionpoints()
     return (frames, framenames, alltiles, stripmap, hstripmap,
-            relatedsets, stripsfile.lookuptables, stripsfile.framenumaliases)
+            relatedsets, stripsfile.lookuptables, stripsfile.framenumaliases,
+            stripsfile.lutaliases)
 
 def main(argv=None):
     args = parse_argv(argv or sys.argv)
@@ -1002,7 +1006,7 @@ def main(argv=None):
     rv = load_strips_from(stripsfilename, celimfilename, celimfilename_flip,
                           write_intermediate)
     (frames, framenames, alltiles, stripmap, hstripmap,
-     relatedsets, luts, framenumaliases) = rv
+     relatedsets, luts, framenumaliases, lutaliases) = rv
     stripmap.append(len(alltiles) // 2)
 
     iframenames = {n: i for i, n in enumerate(framenames)}
@@ -1072,38 +1076,78 @@ def main(argv=None):
         tilesneeded = {x[0] for relf in rel for x in frameuses[relf]}
         if tilesneeded: job["tiles"].append(sorted(tilesneeded))
 
-    # Place tiles in banks
+    # Place tiles in pages.  First try a greedy first fit approach.
     nbanks = -(-len(uniquetiles) // sizeof_bank)
-    use_solve_overload = True
-    if use_solve_overload:
-        # Pagination problem solver; makes subset nonfunctional
+    greedy = [set() for i in range(nbanks)]
+    for tilesneeded in job["tiles"]:
+        for b in range(len(greedy)):
+            candidate = greedy[b].union(tilesneeded)
+            if len(candidate) <= sizeof_bank:
+                greedy[b] = candidate
+                break
+        else:  # no page was assigned
+            print("%s: warning: greedy allocating new bank %d; suboptimal packing?"
+                  % (stripsfilename, len(greedy)), file=sys.stderr)
+            greedy.append(set(tilesneeded))
+    greedy_used_tiles = sum(len(x) for x in greedy)
+    if write_intermediate:
+        pages_pl = "pages" if len(greedy) > 1 else "page"
+        print("%s: greedy fit %d tiles (%d duplicates) in %d %s"
+              % (stripsfilename, greedy_used_tiles,
+                 greedy_used_tiles - len(uniquetiles), len(greedy), pages_pl))
+
+    # Try the "overload and remove" algorithm as implemented by
+    # Aristide Grange et al.
+    # Caution: This solver does not support subset.
+    if not solve_overload:
+        tilesinbank = greedy
+        if write_intermediate:
+            print("%s: warning: solve_overload module not found; using greedy"
+                  % (stripsfilename,))
+    elif nbanks < 2:
+        tilesinbank = greedy
+        if write_intermediate:
+            print("%s: only one page; using greedy" % (stripsfilename,))
+    else:
         pages = solve_overload.run(job)
         pages.decant()
-        tilesinbank = [
+        overload = [
             sorted(set(t for relset in page for t in relset))
             for page in pages
         ]
-        tilesinbank.sort()
+        overload.sort()
+        overload_used_tiles = sum(len(x) for x in greedy)
+        if write_intermediate:
+            print("%s: overload fit %d tiles (%d duplicates) in %d pages"
+                  % (stripsfilename, overload_used_tiles,
+                     overload_used_tiles - len(uniquetiles), len(overload)))
+        if len(greedy) < len(overload):
+            if write_intermediate:
+                print("%s: choosing greedy for fewer pages" % stripsfilename)
+            tilesinbank = greedy
+        elif len(overload) < len(greedy):
+            if write_intermediate:
+                print("%s: choosing overload for fewer pages" % stripsfilename)
+            tilesinbank = overload
+        elif greedy_used_tiles < overload_used_tiles:
+            if write_intermediate:
+                print("%s: choosing greedy for fewer duplicates"
+                      % stripsfilename)
+            tilesinbank = greedy
+        else:
+            if write_intermediate:
+                print("%s: choosing overload for no fewer duplicates"
+                      % stripsfilename)
+            tilesinbank = overload
 
-        # Move the shortest bank to the end
-        shortest_bank = min(enumerate(tilesinbank), key=lambda x: len(x[1]))[0]
-        tilesinbank[-1], tilesinbank[shortest_bank] = \
-                         tilesinbank[shortest_bank], tilesinbank[-1]
-    else:
-        # Previous greedy first fit approach to packing
-        # (which allows subset but needs more fine-tuning with related)
-        tilesinbank = [set() for i in range(nbanks)]
-        for tilesneeded in job["tiles"]:
-            for b in range(len(tilesinbank)):
-                candidate = tilesinbank[b].union(tilesneeded)
-                if len(candidate) <= sizeof_bank:
-                    tilesinbank[b] = candidate
-                    break
-            else:  # no tilesinbank was assigned
-                print("%s: allocating new bank %d; suboptimal packing?"
-                      % (stripsfilename, len(tilesinbank)), file=sys.stderr)
-                tilesinbank.append(set(tilesneeded))
-
+    # Each page shorter than sizeof_bank 8x16-pixel tiles will be
+    # padded at the end with blank tiles, which compress in PB8 to
+    # 4 bytes each.  Move the page with the fewest tiles to the end
+    # so that its padding can be omitted.
+    # (may need to be revised if we ever use subset again)
+    shortest_bank = min(enumerate(tilesinbank), key=lambda x: len(x[1]))[0]
+    tilesinbank[-1], tilesinbank[shortest_bank] = \
+                     tilesinbank[shortest_bank], tilesinbank[-1]
     num_tiles = len(tilesinbank[-1]) + sizeof_bank * (len(tilesinbank) - 1)
 
     # Find which frames use each tile
@@ -1144,7 +1188,7 @@ def main(argv=None):
     banktilesheets = [[uniquetiles[x] for x in ts] for ts in tilesinbank]
     if write_intermediate:
         print("Bank tile sheets length is", [len(x) for x in banktilesheets])
-    # Don't pad the last bank
+    # Pad all but the last bank with blank tiles
     for ts in banktilesheets[:-1]:
         ts.extend([solidtile] * (sizeof_bank - len(ts)))
     if chrfilename:
@@ -1215,14 +1259,40 @@ def main(argv=None):
         for hsm in hstripmap
     )
 
+    # find left and right extents of each cel
+    x_extents = [
+        (min((left_px for left_px, _, _, width_tiles in frame), default=127),
+         max((left_px + 8 * width_tiles
+              for left_px, _, _, width_tiles in frame),
+             default=-128))
+        for frame in hstripmap
+    ]
+    left_lut = lutaliases.get("frame_left")
+    if left_lut:
+        dstlist = luts[left_lut][0]
+        dstlist[:] = (l + 128 for l, r in x_extents)
+    right_lut = lutaliases.get("frame_right")
+    if right_lut:
+        dstlist = luts[right_lut][0]
+        dstlist[:] = (r + 128 for l, r in x_extents)
+    right_lut_info = luts[right_lut] if right_lut else None
+    if write_intermediate:
+        print("attributes in lookup tables:", lutaliases)
+        if left_lut:
+            print("left extents:", left_lut, luts[left_lut])
+        if right_lut:
+            print("right extents:", right_lut, luts[right_lut])
+
     if write_intermediate:
         print("Metasprite total: %d bytes" % msprsize)
-        print("Actual tile indices follow")
-        thingies = zip(framenames, frametobank, tilesinframebybank, hstripmap)
+        print("Actual tile indices follow.\n"
+              "  hstripmap is (left_px, top_px, palette, width_tiles)")
+        thingies = zip(framenames, frametobank, tilesinframebybank,
+                       hstripmap, x_extents)
         print("\n".join(
-            "%s: %d[%s]\n  hstripmap: %s"
-            % (fn, bank, " ".join("%02x" % x for x in idxs), hsm)
-            for (fn, bank, idxs, hsm) in thingies
+            "%s: %d[%s]\n  left: %d; right: %d\n  hstripmap: %s"
+            % (fn, bank, " ".join("%02x" % x for x in idxs), l, r, hsm)
+            for (fn, bank, idxs, hsm, (l, r)) in thingies
         ))
 
     # Separate them out by horizontal strips
